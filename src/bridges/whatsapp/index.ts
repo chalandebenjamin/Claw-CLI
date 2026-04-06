@@ -9,44 +9,52 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { WhatsAppBridge } from './bridge.js';
 
-const MM_URL = process.env.MM_URL ?? '';
-const MM_TOKEN = process.env.MM_TOKEN ?? '';
-const MM_DM_CHANNEL = process.env.MM_DM_CHANNEL ?? '';
 
-async function sendQrToMattermost(qrData: string): Promise<void> {
-  if (!MM_URL || !MM_TOKEN) {
-    console.log('[wa] Pas de config MM, QR non envoyé');
-    return;
+import http from 'http';
+
+let qrServer: http.Server | null = null;
+let latestQrData = '';
+
+/** Start a local HTTP server showing the QR code. Auto-closes after pairing. */
+function serveQrCode(qrData: string): void {
+  latestQrData = qrData;
+
+  if (qrServer) return; // already running, just update qrData
+
+  const QR_PORT = parseInt(process.env.WA_QR_PORT ?? '18790');
+
+  qrServer = http.createServer(async (_req, res) => {
+    try {
+      const QRCode = await import('qrcode');
+      const svgString = await QRCode.default.toString(latestQrData, { type: 'svg', width: 300 });
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<!DOCTYPE html>
+<html><head><title>Claw CLI — WhatsApp QR</title>
+<meta http-equiv="refresh" content="20">
+<style>body{font-family:system-ui;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#111;color:#fff}
+h1{font-size:1.4em;margin-bottom:0.3em}p{color:#aaa;font-size:0.9em}svg{background:#fff;padding:16px;border-radius:12px}</style>
+</head><body>
+<h1>Claw CLI — WhatsApp Pairing</h1>
+<p>Scan with WhatsApp → Settings → Linked Devices → Link a Device</p>
+${svgString}
+<p style="margin-top:1em;font-size:0.8em">Page refreshes automatically. Close after pairing.</p>
+</body></html>`);
+    } catch {
+      res.writeHead(500);
+      res.end('QR generation failed');
+    }
+  });
+
+  qrServer.listen(QR_PORT, () => {
+    console.log(`[wa] 📱 QR code: http://localhost:${QR_PORT}`);
+  });
+}
+
+function closeQrServer(): void {
+  if (qrServer) {
+    qrServer.close();
+    qrServer = null;
   }
-  // Generate PNG buffer
-  const QRCode = await import('qrcode');
-  const pngBuffer = await QRCode.default.toBuffer(qrData, { width: 400, margin: 2 });
-
-  // Upload file to MM
-  const form = new FormData();
-  form.append('channel_id', MM_DM_CHANNEL);
-  form.append('files', new Blob([pngBuffer], { type: 'image/png' }), 'whatsapp-qr.png');
-
-  const uploadResp = await fetch(`${MM_URL}/api/v4/files`, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${MM_TOKEN}` },
-    body: form,
-  });
-  if (!uploadResp.ok) throw new Error(`Upload failed: ${uploadResp.status}`);
-  const uploadData = await uploadResp.json() as { file_infos: { id: string }[] };
-  const fileId = uploadData.file_infos[0].id;
-
-  // Post message with file
-  await fetch(`${MM_URL}/api/v4/posts`, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${MM_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      channel_id: MM_DM_CHANNEL,
-      message: '📱 Scanne ce QR code avec WhatsApp → Paramètres → Appareils liés → Lier un appareil',
-      file_ids: [fileId],
-    }),
-  });
-  console.log('[wa] QR code envoyé sur Mattermost');
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -162,10 +170,10 @@ async function main() {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log('\n[wa] QR code reçu, envoi sur Mattermost...');
-        sendQrToMattermost(qr).catch(err => console.error('[wa] QR MM send failed:', err));
+        serveQrCode(qr);
       }
       if (connection === 'open') {
+        closeQrServer();
         console.log('[wa] Connected to WhatsApp');
         if (sock.user?.id) {
           bridge.addOwnerJid(sock.user.id);
