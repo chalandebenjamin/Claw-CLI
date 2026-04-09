@@ -36,6 +36,12 @@ export function buildSystemPromptFile(): string {
     .map(loadLayer)
     .filter(Boolean);
 
+  // Inject owner name from env if set (keeps prompts anonymous in repo)
+  const ownerName = process.env.OWNER_NAME;
+  if (ownerName) {
+    layers.push(`Le nom de ton owner est ${ownerName}.`);
+  }
+
   writeFileSync(filePath, layers.join('\n\n---\n\n'));
   return filePath;
 }
